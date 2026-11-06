@@ -1,0 +1,107 @@
+name: Build Web Binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-build-${{ github.workflow }}-${{ github.ref }}
+
+env:
+  GOPROXY: https://proxy.golang.org,direct
+  GOSUMDB: sum.golang.org
+  UPDATE_SERVER_URL: ${{ vars.UPDATE_SERVER_URL }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: go vet ./...
+      - run: go test -race ./...
+        continue-on-error: true
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - id: meta
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [ -z "$version" ]; then
+            echo "VERSION 文件为空。" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="v${version//+/-}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Build cross-platform self-contained binaries
+        run: python scripts/build.py --os all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zhenguojian-web-binaries
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: [checks, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zhenguojian-web-binaries
+          path: release
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，跳过重复创建。"
+            exit 0
+          fi
+          cat > notes.md <<EOF
+          真果鉴网页版 v${VERSION} 独立单文件服务端：
+
+          - \`zhenguojian-web-windows-amd64.exe\`：Windows 10/11 x64
+          - \`zhenguojian-web-linux-amd64\`：Linux x86_64 服务器 / 软路由 / Docker 宿主机
+          - \`zhenguojian-web-linux-arm64\`：Linux ARM64（树莓派 / ARM 云主机 / NAS）
+          - \`zhenguojian-web-darwin-arm64\`：macOS Apple Silicon
+          - \`zhenguojian-web-darwin-amd64\`：macOS Intel
+
+          直接运行可执行文件，在浏览器打开 \`http://127.0.0.1:7080\`（或终端打印的局域网地址）即可使用。
+          EOF
+          gh release create "$TAG" release/* --target "$GITHUB_SHA" --title "真果鉴网页版 ${VERSION}" --notes-file notes.md
