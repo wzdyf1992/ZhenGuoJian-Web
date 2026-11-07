@@ -45,10 +45,6 @@ def main() -> None:
     options = parser.parse_args()
 
     go = shutil.which('go')
-    if not go and platform.system() == 'Windows':
-        candidate = Path('C:/Temp/zgj-tools/go/bin/go.exe')
-        if candidate.is_file():
-            go = str(candidate)
     if not go:
         raise SystemExit('请先安装 Go 1.24.1 或更新版本。')
 
